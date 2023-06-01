@@ -26,71 +26,91 @@ module StatisticHelper
         users.login                AS user_name,
         users.firstname            AS firstname,
         users.lastname             AS lastname,
-        SUM(ext_spend_hours.hours) AS ext_spend_hours,
-        SUM(int_spend_hours.hours) AS int_spend_hours
+        time_entries.activity,
+        time_entries.project,
+        time_entries.subject,
+        time_entries.due_date,
+        time_entries.done_ratio,
+        spent_on,
+        hours
       FROM users
-        LEFT JOIN (SELECT
-                     time_entries.user_id as user_id,
-                     SUM(time_entries.hours) as hours
-                   FROM time_entries
-                   WHERE spent_on = CURDATE()
-                         AND time_entries.project_id IN (SELECT custom_values.customized_id
-                                                         FROM custom_values
-                                                         WHERE custom_field_id = (SELECT custom_fields.id
-                                                                                  FROM custom_fields
-                                                                                  WHERE custom_fields.type = 'ProjectCustomField' AND
-                                                                                        custom_fields.name = #{ActiveRecord::Base.sanitize(internal_project_attr)}) AND
-                                                                                        custom_values.value != '1')
-                   GROUP BY time_entries.user_id
-                  ) AS ext_spend_hours
-          ON users.id = ext_spend_hours.user_id
-        LEFT JOIN (SELECT
-                     time_entries.user_id as user_id,
-                     SUM(time_entries.hours) as hours
-                   FROM time_entries
-                   WHERE spent_on = CURDATE()
-                         AND time_entries.project_id IN (SELECT custom_values.customized_id
-                                                         FROM custom_values
-                                                         WHERE custom_field_id = (SELECT custom_fields.id
-                                                                                  FROM custom_fields
-                                                                                  WHERE custom_fields.type = 'ProjectCustomField' AND
-                                                                                        custom_fields.name = #{ActiveRecord::Base.sanitize(internal_project_attr)}) AND
-                                                                                        custom_values.value = '1')
-                   GROUP BY time_entries.user_id
-                  ) AS int_spend_hours
-          ON users.id = int_spend_hours.user_id
+        LEFT JOIN ( SELECT user_id, enumerations.name as activity,
+          projects.name as project,
+          issues.subject,
+          issues.due_date,
+          issues.done_ratio,
+          spent_on,
+          hours
+          FROM time_entries
+          LEFT JOIN `projects` ON `projects`.`id` = `time_entries`.`project_id`
+          LEFT OUTER JOIN `enumerations` ON `enumerations`.`id` = `time_entries`.`activity_id` AND `enumerations`.`type` IN ('TimeEntryActivity') 
+          LEFT OUTER JOIN issues ON issues.id = time_entries.issue_id
+          WHERE spent_on = CURDATE()
+          ) as time_entries
+        ON users.id = time_entries.user_id
       WHERE users.id IN  #{str_arr}
-      GROUP BY users.id
+      ORDER BY users.id
     ").to_a
+      projects = ActiveRecord::Base.connection.execute("
+        SELECT projects.name as project, custom_fields.name, value, group_concat(members.user_id) as members 
+        FROM `custom_values` 
+        LEFT OUTER JOIN `custom_fields` ON `custom_fields`.`id` = `custom_values`.`custom_field_id`
+        LEFT OUTER JOIN `members` ON `members`.`project_id` = `custom_values`.`customized_id`
+        LEFT JOIN `projects` ON `projects`.`id` = customized_id
+        WHERE `custom_values`.`customized_type` = 'Project' AND value is not null AND value != ''
+          AND custom_fields.name in ('Slack URL', 'Slack Channel') AND projects.status = 1
+        GROUP BY customized_id, custom_fields.name
+      ").to_a.group_by(&:shift)
 
-      time_statistic.each do |item|
-        ext_spend_hours = item[4]
-        int_spend_hours = item[5]
-        case
-          when !ext_spend_hours.nil?
-            user_id       = item[0].to_s
-            user_time     = users_time[user_id].to_f
-            required_time = user_time == 0 ? daily_working_hours: user_time
-            percentage    = ((ext_spend_hours.to_f / required_time) - 1) * 100
-            record        = ["#{item[2]} #{item[3]}", percentage.round(2)]
-            if percentage >= 0
-              time_top.push(record)
-            else
-              time_bottom.push(record)
-            end
-          when !int_spend_hours.nil?
-            percentage    = -100
-            record        = ["#{item[2]} #{item[3]}", percentage.round(2)]
-            time_bottom.push(record)
+      result = {}
+      time_statistic.group_by(&:shift).each do |user_id, user|
+        sum_spend_hours = 0
+        issue = ''
+        user_name = ''
+
+        user.each do |item|
+          spend_hours = item[9]
+          user_name = "#{item[1]} #{item[2]}"
+
+          if !spend_hours.nil?
+            sum_spend_hours += spend_hours
+            issue += "\n * #{item[3]} - #{item[4]} - #{item[5]} - #{item[6]} - #{item[7]}%"
           else
-            record        = ["#{item[2]} #{item[3]}", nil]
-            time_idle.push(record)
+            record = ["#{item[1]} #{item[2]}", nil]
+            projects.each do |project_name, project|
+              result[project_name] = {:time_top => [], :time_bottom => [], :time_idle => [], :url => '', :channel => ''} if result[project_name].nil?
+              if !project[0].nil? && project[0][2].split(",").include?(user_id.to_s)
+                result[project_name][:time_idle].push(record)
+                result[project_name][:url] = project[1][1]
+                result[project_name][:channel] = project[0][1]
+              end
+            end
+          end
         end
 
+        unless sum_spend_hours.zero?
+          required_time = daily_working_hours
+          percentage    = ((sum_spend_hours.to_f / required_time) - 1) * 100
+          record        = ["#{user_name}", sum_spend_hours, "#{issue}"]
+          projects.each do |project_name, project|
+            result[project_name] = {:time_top => [], :time_bottom => [], :time_idle => [], :url => '', :channel => ''} if result[project_name].nil?
+            if !project[0].nil? && project[0][2].split(",").include?(user_id.to_s)
+              if percentage >= 0
+                result[project_name][:time_top].push(record)
+              else
+                result[project_name][:time_bottom].push(record)
+              end
+
+              result[project_name][:url] = project[1][1]
+              result[project_name][:channel] = project[0][1]
+            end
+          end
+        end
       end
     end
 
-    {:time_top => time_top, :time_bottom => time_bottom, :time_idle => time_idle}
+    # {:project_name => {:time_top => time_top, :time_bottom => time_bottom, :time_idle => time_idle, :url => url, :channel => channel}}
+    result
   end
 
 end
