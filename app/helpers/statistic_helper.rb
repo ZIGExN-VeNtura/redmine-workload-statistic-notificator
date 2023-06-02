@@ -58,7 +58,7 @@ module StatisticHelper
         LEFT OUTER JOIN `members` ON `members`.`project_id` = `custom_values`.`customized_id`
         LEFT JOIN `projects` ON `projects`.`id` = customized_id
         WHERE `custom_values`.`customized_type` = 'Project' AND value is not null AND value != ''
-          AND custom_fields.name in ('Slack URL', 'Slack Channel') AND projects.status = 1
+          AND custom_fields.name in ('Daily Slack URL', 'Daily Slack Channel') AND projects.status = 1
         GROUP BY customized_id, custom_fields.name
       ").to_a.group_by(&:shift)
 

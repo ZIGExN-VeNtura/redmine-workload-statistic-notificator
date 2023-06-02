@@ -7,12 +7,18 @@ task :send_day_workload_statistic => :environment do
   day_statistic_enable  = Setting.plugin_workload_statistic_notificator['day_statistic_enable']
 
   if day_statistic_enable
-    time_now           = Time.now.strftime("%H:%M")
+    time_now = Time.now
+
+    return if time_now.saturday? || time_now.sunday?
+
+    # time_now           = Time.now.strftime("%H:%M")
     day_statistic_time = Setting.plugin_workload_statistic_notificator['day_statistic_time']
 
-    p time_now
+    # p time_now
 
-    if time_now == day_statistic_time
+    # Disable a time setting
+    if true
+    # if time_now == day_statistic_time
       url     = Setting.plugin_workload_statistic_notificator['slack_url']
       channel = Setting.plugin_workload_statistic_notificator['day_statistic_channel']
       icon    = Setting.plugin_workload_statistic_notificator['icon']
